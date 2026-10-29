@@ -183,13 +183,13 @@ fn build_health(mem_pct: f64, swap_pct: f64, temps: &[TempDto]) -> HealthDto {
     let hottest = temps.iter().fold(0.0_f64, |m, t| m.max(t.celsius));
     let mut issues = Vec::new();
     if mem_pct > 90.0 {
-        issues.push("Memory usage is very high".to_string());
+        issues.push(format!("Memory usage is {mem_pct:.0}%"));
     }
     if swap_pct > 50.0 {
-        issues.push("Heavy swap usage — system may be under memory pressure".to_string());
+        issues.push(format!("Swap usage is {swap_pct:.0}%"));
     }
     if hottest > 85.0 {
-        issues.push(format!("High temperature detected ({hottest:.0}°C)"));
+        issues.push(format!("Hottest sensor is at {hottest:.0}°C"));
     }
     let status = if issues.iter().any(|_| mem_pct > 95.0 || hottest > 90.0) {
         "critical"
