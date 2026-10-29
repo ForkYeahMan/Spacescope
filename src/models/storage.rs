@@ -30,6 +30,29 @@ impl StorageInfo {
                 }
             }
         }
+        Self::from_disks(path)
+    }
+
+    /// Capacity of the disk that holds `path`, found by the longest matching
+    /// mount point. Used where `statfs` doesn't exist (Windows).
+    #[cfg(not(unix))]
+    fn from_disks(path: &std::path::Path) -> Self {
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        disks
+            .iter()
+            .filter(|d| canonical.starts_with(d.mount_point()))
+            .max_by_key(|d| d.mount_point().as_os_str().len())
+            .map(|d| Self {
+                total_space: d.total_space(),
+                available_space: d.available_space(),
+                used_space: d.total_space().saturating_sub(d.available_space()),
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(unix)]
+    fn from_disks(_path: &std::path::Path) -> Self {
         Self::default()
     }
 
