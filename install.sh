@@ -2,13 +2,13 @@
 # Install Spacescope.
 #
 #   ./install.sh                 # build from this checkout and install
-#   curl -fsSL https://raw.githubusercontent.com/ForkYeahMan/mac-disk-cleaner/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/ForkYeahMan/Spacescope/main/install.sh | bash
 #
 # Installs the `spacescope` binary into Cargo's bin dir (~/.cargo/bin), which
 # is normally already on your PATH. Needs Rust 1.85+; offers to install it.
 set -euo pipefail
 
-REPO="https://github.com/ForkYeahMan/mac-disk-cleaner"
+REPO="https://github.com/ForkYeahMan/Spacescope"
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
