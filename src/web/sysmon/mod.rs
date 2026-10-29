@@ -10,4 +10,5 @@
 mod dto;
 mod monitor;
 
+pub use dto::{MetricsDto, SystemInfoDto};
 pub use monitor::SysMonitor;

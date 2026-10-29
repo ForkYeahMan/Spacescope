@@ -1,9 +1,9 @@
 //! The parallel directory walk that powers a scan.
 //!
 //! A pool of worker threads pull directories off a shared work queue, read each
-//! one, stream matching entries back over a channel and push newly discovered
-//! subdirectories back onto the queue. Hard links are de-duplicated by inode so
-//! their bytes are only counted once.
+//! one, collect matching entries and push newly discovered subdirectories back
+//! onto the queue. Hard links are de-duplicated by inode so their bytes are only
+//! counted once, and the walk can be cancelled at any point.
 
 use super::{classify, skip};
 use crate::models::FileEntry;
@@ -11,348 +11,280 @@ use chrono::{DateTime, Local};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-/// Number of parallel worker threads for scanning.
-const NUM_WORKERS: usize = 4;
+/// Settings that stay fixed for the lifetime of one walk.
+pub(super) struct WalkOptions {
+    pub min_size: u64,
+    /// Directory levels to descend below the root (`0` = unlimited).
+    pub max_depth: usize,
+    pub is_full_disk: bool,
+    pub root_device: Option<u64>,
+}
 
-/// Scan everything using parallel workers with inode tracking.
+/// Live counters the progress publisher reads while the walk is running.
+#[derive(Default)]
+pub(super) struct Counters {
+    pub files: AtomicUsize,
+    pub dirs: AtomicUsize,
+    pub bytes: AtomicU64,
+    /// Directories read so far, and discovered but not yet read.
+    pub dirs_done: AtomicUsize,
+    pub dirs_pending: AtomicUsize,
+    pub current_path: Mutex<String>,
+    pub categories: Mutex<HashMap<String, u64>>,
+}
+
+/// Work queue plus the number of directories currently being processed, kept
+/// under one lock so "queue empty and nobody active" is a race-free exit test.
+#[derive(Default)]
+struct Queue {
+    state: Mutex<QueueState>,
+    wake: Condvar,
+}
+
+#[derive(Default)]
+struct QueueState {
+    items: VecDeque<(PathBuf, usize)>,
+    active: usize,
+}
+
+impl Queue {
+    /// Next directory to process, blocking while other workers may still add
+    /// more. `None` means the walk is finished (or cancelled).
+    fn next(&self, cancel: &AtomicBool) -> Option<(PathBuf, usize)> {
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let Some(item) = state.items.pop_front() {
+                state.active += 1;
+                return Some(item);
+            }
+            if state.active == 0 {
+                return None;
+            }
+            state = self.wake.wait(state).unwrap();
+        }
+    }
+
+    fn finish(&self, discovered: Vec<(PathBuf, usize)>) {
+        let mut state = self.state.lock().unwrap();
+        state.items.extend(discovered);
+        state.active -= 1;
+        self.wake.notify_all();
+    }
+}
+
+struct Walk<'a> {
+    opts: &'a WalkOptions,
+    counters: &'a Counters,
+    queue: Queue,
+    seen_inodes: Mutex<HashSet<(u64, u64)>>,
+    cancel: &'a AtomicBool,
+}
+
+/// What a walk produces: the listed entries, plus the byte total of the files
+/// sitting directly inside each directory that was read (small files included).
+pub(super) struct WalkOutput {
+    pub entries: Vec<FileEntry>,
+    pub dir_bytes: Vec<(PathBuf, u64)>,
+}
+
+/// Walk `root` and return every directory plus every file at least `min_size`.
 pub(super) fn scan_all(
     root: &Path,
-    min_size: u64,
-    is_full_disk: bool,
-    root_device_id: Option<u64>,
-    entries: &Arc<Mutex<Vec<FileEntry>>>,
-    current_path: &Arc<Mutex<String>>,
-    files_count: &Arc<AtomicUsize>,
-    dirs_count: &Arc<AtomicUsize>,
-    total_size: &Arc<AtomicU64>,
-    category_sizes: &Arc<std::sync::Mutex<HashMap<String, u64>>>,
-) {
-    use std::sync::mpsc;
-    use std::thread;
+    opts: &WalkOptions,
+    counters: &Counters,
+    cancel: &AtomicBool,
+) -> WalkOutput {
+    let walk = Walk {
+        opts,
+        counters,
+        queue: Queue::default(),
+        seen_inodes: Mutex::new(HashSet::new()),
+        cancel,
+    };
+    walk.queue.state.lock().unwrap().items.push_back((root.to_path_buf(), 0));
+    counters.dirs_pending.store(1, Ordering::Relaxed);
 
-    // Work queue
-    let work_queue = Arc::new(std::sync::Mutex::new(VecDeque::<PathBuf>::with_capacity(100000)));
-    let active_workers = Arc::new(AtomicUsize::new(0));
-    let scan_complete = Arc::new(AtomicBool::new(false));
+    let workers = thread::available_parallelism()
+        .map(|n| n.get().clamp(2, 8))
+        .unwrap_or(4);
 
-    // Track seen inodes to avoid counting hard links multiple times
-    let seen_inodes = Arc::new(std::sync::Mutex::new(HashSet::<u64>::with_capacity(500000)));
-
-    // Share scan settings with workers
-    let is_full_disk_shared = Arc::new(is_full_disk);
-    let root_device_shared = Arc::new(root_device_id);
-
-    // Counters for logging
-    let skipped_permission = Arc::new(AtomicUsize::new(0));
-    let skipped_virtual = Arc::new(AtomicUsize::new(0));
-    let skipped_different_fs = Arc::new(AtomicUsize::new(0));
-    let hardlink_deduped = Arc::new(AtomicUsize::new(0));
-
-    let (entry_tx, entry_rx) = mpsc::channel::<Vec<FileEntry>>();
-
-    // Initialize queue
-    {
-        let mut queue = work_queue.lock().unwrap();
-        queue.push_back(root.to_path_buf());
-    }
-
-    // Spawn workers
-    let mut handles = Vec::with_capacity(NUM_WORKERS);
-
-    for _worker_id in 0..NUM_WORKERS {
-        let queue = work_queue.clone();
-        let active = active_workers.clone();
-        let complete = scan_complete.clone();
-        let tx = entry_tx.clone();
-        let current_path = current_path.clone();
-        let files_count = files_count.clone();
-        let dirs_count = dirs_count.clone();
-        let total_size = total_size.clone();
-        let seen_inodes = seen_inodes.clone();
-        let skipped_permission = skipped_permission.clone();
-        let skipped_virtual = skipped_virtual.clone();
-        let skipped_different_fs = skipped_different_fs.clone();
-        let hardlink_deduped = hardlink_deduped.clone();
-        let is_full_disk_w = is_full_disk_shared.clone();
-        let root_device_w = root_device_shared.clone();
-        let category_sizes_w = category_sizes.clone();
-
-        let handle = thread::spawn(move || {
-            let mut local_entries = Vec::with_capacity(1000);
-            let mut update_counter = 0u32;
-            let mut local_category_sizes: HashMap<String, u64> = HashMap::new();
-
-            loop {
-                let dir_path = {
-                    let mut q = queue.lock().unwrap();
-                    q.pop_front()
-                };
-
-                match dir_path {
-                    Some(path) => {
-                        active.fetch_add(1, Ordering::SeqCst);
-
-                        process_directory(
-                            &path,
-                            min_size,
-                            *is_full_disk_w,
-                            *root_device_w,
-                            &queue,
-                            &mut local_entries,
-                            &current_path,
-                            &files_count,
-                            &dirs_count,
-                            &total_size,
-                            &seen_inodes,
-                            &skipped_permission,
-                            &skipped_virtual,
-                            &skipped_different_fs,
-                            &hardlink_deduped,
-                            &mut update_counter,
-                            &mut local_category_sizes,
-                        );
-
-                        if local_entries.len() >= 1000 {
-                            let _ = tx.send(std::mem::take(&mut local_entries));
-                            local_entries = Vec::with_capacity(1000);
-                        }
-
-                        // Periodically merge local category sizes into shared
-                        if update_counter % 100 == 0 && !local_category_sizes.is_empty() {
-                            if let Ok(mut shared_cats) = category_sizes_w.try_lock() {
-                                for (cat, size) in local_category_sizes.drain() {
-                                    *shared_cats.entry(cat).or_insert(0) += size;
-                                }
-                            }
-                        }
-
-                        active.fetch_sub(1, Ordering::SeqCst);
-                    }
-                    None => {
-                        if active.load(Ordering::SeqCst) == 0 {
-                            let q = queue.lock().unwrap();
-                            if q.is_empty() {
-                                break;
-                            }
-                        }
-                        thread::sleep(std::time::Duration::from_micros(100));
-                    }
-                }
-
-                if complete.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-
-            // Flush remaining local category sizes
-            if !local_category_sizes.is_empty() {
-                if let Ok(mut shared_cats) = category_sizes_w.lock() {
-                    for (cat, size) in local_category_sizes.drain() {
-                        *shared_cats.entry(cat).or_insert(0) += size;
-                    }
-                }
-            }
-
-            if !local_entries.is_empty() {
-                let _ = tx.send(local_entries);
-            }
-        });
-
-        handles.push(handle);
-    }
-
-    drop(entry_tx);
-
-    // Collect entries
-    let runtime = tokio::runtime::Handle::try_current();
-
-    for batch in entry_rx {
-        if let Ok(handle) = &runtime {
-            handle.block_on(async {
-                let mut ents = entries.lock().await;
-                ents.extend(batch);
-            });
-        } else {
-            loop {
-                if let Ok(mut ents) = entries.try_lock() {
-                    ents.extend(batch);
-                    break;
-                }
-                thread::sleep(std::time::Duration::from_millis(1));
+    thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| scope.spawn(|| walk.worker()))
+            .collect();
+        let mut out = WalkOutput { entries: Vec::new(), dir_bytes: Vec::new() };
+        for handle in handles {
+            if let Ok(part) = handle.join() {
+                out.entries.extend(part.entries);
+                out.dir_bytes.extend(part.dir_bytes);
             }
         }
-    }
-
-    for handle in handles {
-        let _ = handle.join();
-    }
-
-    scan_complete.store(true, Ordering::Relaxed);
+        out
+    })
 }
 
-/// Process a single directory.
-fn process_directory(
-    dir_path: &Path,
-    min_size: u64,
-    is_full_disk: bool,
-    root_device_id: Option<u64>,
-    work_queue: &Arc<std::sync::Mutex<VecDeque<PathBuf>>>,
-    local_entries: &mut Vec<FileEntry>,
-    current_path: &Arc<Mutex<String>>,
-    files_count: &Arc<AtomicUsize>,
-    dirs_count: &Arc<AtomicUsize>,
-    total_size: &Arc<AtomicU64>,
-    seen_inodes: &Arc<std::sync::Mutex<HashSet<u64>>>,
-    skipped_permission: &Arc<AtomicUsize>,
-    skipped_virtual: &Arc<AtomicUsize>,
-    skipped_different_fs: &Arc<AtomicUsize>,
-    hardlink_deduped: &Arc<AtomicUsize>,
-    update_counter: &mut u32,
-    local_category_sizes: &mut HashMap<String, u64>,
-) {
-    // Skip virtual paths and mount points that would cause double-counting
-    if skip::should_skip_path(dir_path, is_full_disk) {
-        skipped_virtual.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
+impl Walk<'_> {
+    fn worker(&self) -> WalkOutput {
+        let mut entries = Vec::new();
+        let mut dir_bytes = Vec::new();
+        let mut local_categories: HashMap<String, u64> = HashMap::new();
+        let mut visited = 0u32;
 
-    // Skip paths on different filesystems to avoid counting mounted volumes
-    if skip::is_different_filesystem(dir_path, root_device_id) {
-        skipped_different_fs.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    *update_counter += 1;
-    if *update_counter % 50 == 0 {
-        if let Ok(mut cp) = current_path.try_lock() {
-            *cp = dir_path.to_string_lossy().to_string();
+        while let Some((dir, depth)) = self.queue.next(self.cancel) {
+            visited += 1;
+            if visited % 50 == 0 {
+                if let Ok(mut cp) = self.counters.current_path.try_lock() {
+                    *cp = dir.to_string_lossy().into_owned();
+                }
+            }
+            let (subdirs, own_bytes) = self.process_directory(&dir, depth, &mut entries, &mut local_categories);
+            if let Some(own) = own_bytes {
+                dir_bytes.push((dir, own));
+            }
+            self.counters.dirs_done.fetch_add(1, Ordering::Relaxed);
+            self.counters.dirs_pending.fetch_add(subdirs.len(), Ordering::Relaxed);
+            self.counters.dirs_pending.fetch_sub(1, Ordering::Relaxed);
+            self.queue.finish(subdirs);
+            self.flush_categories(&mut local_categories, false);
         }
+        self.flush_categories(&mut local_categories, true);
+        WalkOutput { entries, dir_bytes }
     }
 
-    // Read directory
-    let read_dir = match std::fs::read_dir(dir_path) {
-        Ok(rd) => rd,
-        Err(_) => {
-            skipped_permission.fetch_add(1, Ordering::Relaxed);
+    /// Merge a worker's category tallies into the shared map. Non-blocking
+    /// unless `force`, so a busy progress publisher never stalls the walk.
+    fn flush_categories(&self, local: &mut HashMap<String, u64>, force: bool) {
+        if local.is_empty() {
             return;
         }
-    };
-
-    let mut new_dirs = Vec::new();
-
-    for entry in read_dir {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-
-        // Get metadata - use symlink_metadata to detect symlinks before following
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        let is_dir = metadata.is_dir();
-        let is_symlink = metadata.file_type().is_symlink();
-
-        // Skip symlinks to avoid double counting and loops
-        if is_symlink {
-            continue;
-        }
-
-        // For files, check inode to avoid counting hard links multiple times
-        #[cfg(unix)]
-        let (size, is_hardlink_dupe) = if !is_dir {
-            let inode = metadata.ino();
-            let nlink = metadata.nlink();
-
-            // If file has multiple hard links, only count it once
-            if nlink > 1 {
-                let mut seen = seen_inodes.lock().unwrap();
-                if seen.contains(&inode) {
-                    hardlink_deduped.fetch_add(1, Ordering::Relaxed);
-                    (0u64, true)
-                } else {
-                    seen.insert(inode);
-                    (metadata.len(), false)
-                }
-            } else {
-                (metadata.len(), false)
-            }
+        let guard = if force {
+            self.counters.categories.lock().ok()
         } else {
-            (0u64, false)
+            self.counters.categories.try_lock().ok()
         };
-
-        #[cfg(not(unix))]
-        let (size, is_hardlink_dupe) = if !is_dir {
-            (metadata.len(), false)
-        } else {
-            (0u64, false)
-        };
-
-        if is_dir {
-            dirs_count.fetch_add(1, Ordering::Relaxed);
-            // Skip directories that would cause double-counting
-            if skip::should_skip_path(&path, is_full_disk) {
-                skipped_virtual.fetch_add(1, Ordering::Relaxed);
-            } else if skip::is_different_filesystem(&path, root_device_id) {
-                skipped_different_fs.fetch_add(1, Ordering::Relaxed);
-            } else {
-                new_dirs.push(path.clone());
+        if let Some(mut shared) = guard {
+            for (name, size) in local.drain() {
+                *shared.entry(name).or_insert(0) += size;
             }
-        } else if !is_hardlink_dupe {
-            files_count.fetch_add(1, Ordering::Relaxed);
-            total_size.fetch_add(size, Ordering::Relaxed);
-
-            // Track category sizes
-            let is_hidden = classify::is_hidden_path(&path);
-            let is_system = classify::is_system_path(&path);
-            let category = classify::categorize_path(&path, is_hidden, is_system);
-            *local_category_sizes.entry(category.to_string()).or_insert(0) += size;
-        }
-
-        // Track items above minimum size or directories
-        if (size >= min_size && !is_hardlink_dupe) || is_dir {
-            let is_hidden = classify::is_hidden_path(&path);
-            let is_system = classify::is_system_path(&path);
-            let modified = get_modified_time(&metadata);
-
-            local_entries.push(FileEntry {
-                path: path.clone(),
-                size,
-                is_dir,
-                is_hidden,
-                is_system,
-                modified,
-                name: name_str.to_string(),
-            });
         }
     }
 
-    // Add new directories to queue
-    if !new_dirs.is_empty() {
-        let mut queue = work_queue.lock().unwrap();
-        for dir in new_dirs {
-            queue.push_back(dir);
+    /// Read one directory and record its entries. Returns the subdirectories to
+    /// visit and the bytes of files directly inside (`None` if it wasn't read).
+    fn process_directory(
+        &self,
+        dir: &Path,
+        depth: usize,
+        entries: &mut Vec<FileEntry>,
+        categories: &mut HashMap<String, u64>,
+    ) -> (Vec<(PathBuf, usize)>, Option<u64>) {
+        let opts = self.opts;
+        if self.should_skip(dir) {
+            return (Vec::new(), None);
         }
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return (Vec::new(), None);
+        };
+        let mut own_bytes = 0u64;
+
+        let descend = opts.max_depth == 0 || depth + 1 < opts.max_depth;
+        let mut subdirs = Vec::new();
+
+        for entry in read_dir.flatten() {
+            // `DirEntry::metadata` does not follow symlinks; skipping them
+            // avoids loops and double counting.
+            let Ok(metadata) = entry.metadata() else { continue };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+
+            let path = entry.path();
+            let is_dir = metadata.is_dir();
+
+            if is_dir {
+                self.counters.dirs.fetch_add(1, Ordering::Relaxed);
+                if !self.should_skip(&path) && descend {
+                    subdirs.push((path.clone(), depth + 1));
+                }
+                entries.push(self.entry(&path, &entry, 0, true, &metadata));
+                continue;
+            }
+
+            if self.is_duplicate_hardlink(&metadata) {
+                continue;
+            }
+            let size = metadata.len();
+            own_bytes += size;
+            self.counters.files.fetch_add(1, Ordering::Relaxed);
+            self.counters.bytes.fetch_add(size, Ordering::Relaxed);
+
+            let hidden = classify::is_hidden_path(&path);
+            let system = classify::is_system_path(&path);
+            let category = classify::categorize_path(&path, hidden, system);
+            *categories.entry(category.to_string()).or_insert(0) += size;
+
+            if size >= opts.min_size {
+                entries.push(self.entry(&path, &entry, size, false, &metadata));
+            }
+        }
+        (subdirs, Some(own_bytes))
+    }
+
+    fn entry(
+        &self,
+        path: &Path,
+        dir_entry: &std::fs::DirEntry,
+        size: u64,
+        is_dir: bool,
+        metadata: &std::fs::Metadata,
+    ) -> FileEntry {
+        FileEntry {
+            path: path.to_path_buf(),
+            size,
+            is_dir,
+            is_hidden: classify::is_hidden_path(path),
+            is_system: classify::is_system_path(path),
+            modified: modified_time(metadata),
+            name: dir_entry.file_name().to_string_lossy().into_owned(),
+        }
+    }
+
+    fn should_skip(&self, path: &Path) -> bool {
+        skip::should_skip_path(path, self.opts.is_full_disk)
+            || skip::is_different_filesystem(path, self.opts.root_device)
+    }
+
+    /// True when this file is a hard link whose bytes were already counted.
+    #[cfg(unix)]
+    fn is_duplicate_hardlink(&self, metadata: &std::fs::Metadata) -> bool {
+        if metadata.nlink() <= 1 {
+            return false;
+        }
+        !self
+            .seen_inodes
+            .lock()
+            .unwrap()
+            .insert((metadata.dev(), metadata.ino()))
+    }
+
+    #[cfg(not(unix))]
+    fn is_duplicate_hardlink(&self, _metadata: &std::fs::Metadata) -> bool {
+        false
     }
 }
 
-fn get_modified_time(metadata: &std::fs::Metadata) -> DateTime<Local> {
+fn modified_time(metadata: &std::fs::Metadata) -> DateTime<Local> {
     metadata
         .modified()
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .map(|d| Local::now() - chrono::Duration::seconds(d.as_secs() as i64))
-        .unwrap_or_else(Local::now)
+        .map(DateTime::<Local>::from)
+        .unwrap_or_else(|_| Local::now())
 }

@@ -22,6 +22,19 @@ impl From<&StorageInfo> for StorageDto {
     }
 }
 
+/// Static info the UI needs before it starts a scan.
+#[derive(Serialize)]
+pub struct ConfigDto {
+    pub version: &'static str,
+    pub platform: &'static str,
+    pub default_path: String,
+    pub home_path: String,
+    pub root_path: String,
+    pub min_size_mb: u64,
+    pub max_depth: usize,
+    pub storage: StorageDto,
+}
+
 #[derive(Serialize)]
 pub struct ProgressDto {
     pub files: usize,
@@ -29,6 +42,10 @@ pub struct ProgressDto {
     pub size: u64,
     pub current_path: String,
     pub complete: bool,
+    pub cancelled: bool,
+    pub error: Option<String>,
+    /// Estimated completion, 0–100.
+    pub percent: f64,
     /// Live size-by-group breakdown of what has been discovered so far,
     /// sorted largest first. Drives the scanning chart.
     pub categories: Vec<ProgressCategoryDto>,
@@ -102,6 +119,9 @@ fn default_min_size() -> u64 {
 #[derive(Deserialize)]
 pub struct DeleteRequest {
     pub paths: Vec<String>,
+    /// The user confirmed in the UI: allow deleting for the rest of this session.
+    #[serde(default)]
+    pub authorize: bool,
 }
 
 #[derive(Serialize)]

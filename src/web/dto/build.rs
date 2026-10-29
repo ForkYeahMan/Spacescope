@@ -44,15 +44,17 @@ fn human(bytes: u64) -> String {
 /// context) so the breakdown, directory rollup and file list stay O(n).
 pub fn build_results(scan_path: &Path, entries: &[(FileEntry, FileCategory)]) -> ResultsDto {
     let storage = StorageInfo::from_path(scan_path);
+    // System files are shown in the folder browser but never counted as cleanable.
+    let visible: Vec<&(FileEntry, FileCategory)> = entries.iter().filter(|(e, _)| !e.is_system).collect();
 
-    let total_files = entries.iter().filter(|(e, _)| !e.is_dir).count();
-    let total_dirs = entries.iter().filter(|(e, _)| e.is_dir).count();
-    let total_size: u64 = entries.iter().filter(|(e, _)| !e.is_dir).map(|(e, _)| e.size).sum();
+    let total_files = visible.iter().filter(|(e, _)| !e.is_dir).count();
+    let total_dirs = visible.iter().filter(|(e, _)| e.is_dir).count();
+    let total_size: u64 = visible.iter().filter(|(e, _)| !e.is_dir).map(|(e, _)| e.size).sum();
 
     // Category breakdown
     let mut cat_size: HashMap<FileCategory, u64> = HashMap::new();
     let mut cat_count: HashMap<FileCategory, usize> = HashMap::new();
-    for (entry, cat) in entries {
+    for (entry, cat) in visible.iter().copied() {
         *cat_size.entry(*cat).or_default() += entry.size;
         *cat_count.entry(*cat).or_default() += 1;
     }
@@ -77,7 +79,7 @@ pub fn build_results(scan_path: &Path, entries: &[(FileEntry, FileCategory)]) ->
         .collect();
     categories.sort_by(|a, b| b.size.cmp(&a.size));
 
-    let safe_savings: u64 = entries
+    let safe_savings: u64 = visible
         .iter()
         .filter(|(e, c)| !e.is_dir && c.is_safe_to_delete())
         .map(|(e, _)| e.size)
@@ -85,7 +87,7 @@ pub fn build_results(scan_path: &Path, entries: &[(FileEntry, FileCategory)]) ->
 
     // Top-level directory rollup relative to the scan root.
     let mut dir_sizes: HashMap<String, u64> = HashMap::new();
-    for (entry, _) in entries {
+    for (entry, _) in visible.iter().copied() {
         if entry.is_dir {
             continue;
         }
@@ -108,7 +110,7 @@ pub fn build_results(scan_path: &Path, entries: &[(FileEntry, FileCategory)]) ->
 
     // Largest individual files.
     let mut sorted: Vec<&(FileEntry, FileCategory)> =
-        entries.iter().filter(|(e, _)| !e.is_dir).collect();
+        visible.iter().copied().filter(|(e, _)| !e.is_dir).collect();
     sorted.sort_by(|a, b| b.0.size.cmp(&a.0.size));
     let files: Vec<FileDto> = sorted
         .into_iter()

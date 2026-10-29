@@ -1,36 +1,43 @@
+mod analyzer;
+mod cleaner;
 mod models;
 mod scanner;
 mod web;
-mod analyzer;
-mod cleaner;
 
 use anyhow::Result;
 use clap::Parser;
+use std::net::IpAddr;
 use std::path::PathBuf;
+use web::Settings;
 
+/// Disk-space analyzer, system monitor and safe cleaner — all behind a local web UI.
 #[derive(Parser, Debug)]
-#[command(name = "disk-cleaner")]
-#[command(about = "Smart disk space analyzer and cleaner (web UI)", long_about = None)]
+#[command(name = "spacescope", version, about)]
 struct Args {
-    /// Default directory to pre-fill in the UI (defaults to root / for full disk)
+    /// Default directory pre-filled in the Cleaner (defaults to the whole disk)
     #[arg(short, long)]
     path: Option<PathBuf>,
 
-    /// Minimum file size to display (in MB)
-    #[arg(short, long, default_value = "1")]
-    min_size: u64,
-
-    /// Scan depth limit (0 = unlimited)
-    #[arg(short, long, default_value = "0")]
-    depth: usize,
-
-    /// Use home directory as the default scan path instead of full disk
-    #[arg(long)]
+    /// Default the Cleaner to your home directory instead of the whole disk
+    #[arg(long, conflicts_with = "path")]
     home: bool,
 
-    /// Port for the web UI
-    #[arg(long, default_value = "8080")]
+    /// Minimum file size to list, in MB
+    #[arg(short, long, default_value_t = 1)]
+    min_size: u64,
+
+    /// Directory levels to descend below the scan root (0 = unlimited)
+    #[arg(short, long, default_value_t = 0)]
+    depth: usize,
+
+    /// Port for the web UI (the next free port is used if it is taken)
+    #[arg(long, default_value_t = 8080)]
     port: u16,
+
+    /// Address to listen on. Anything other than a loopback address exposes the
+    /// UI — and file deletion — to your network with no authentication.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: IpAddr,
 
     /// Do not open the browser automatically
     #[arg(long)]
@@ -41,35 +48,55 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let default_path = if let Some(path) = args.path {
-        path
-    } else if args.home {
-        dirs::home_dir().expect("Failed to get home directory")
-    } else {
-        PathBuf::from("/")
+    let default_path = match (args.path, args.home) {
+        (Some(path), _) => path,
+        (None, true) => web::home_dir(),
+        (None, false) => web::filesystem_root(),
+    };
+    let settings = Settings {
+        default_path,
+        min_size_mb: args.min_size,
+        max_depth: args.depth,
     };
 
-    if !args.no_open {
-        let url = format!("http://127.0.0.1:{}", args.port);
-        tokio::spawn(async move {
-            // Give the server a moment to bind, then best-effort open the browser.
-            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            let _ = open_browser(&url);
-        });
+    let listener = web::bind(args.host, args.port).await?;
+    let addr = listener.local_addr()?;
+    let url = format!("http://{addr}");
+
+    println!("\n  Spacescope {}", env!("CARGO_PKG_VERSION"));
+    println!("  Running at {url}  (Ctrl-C to stop)\n");
+    if !addr.ip().is_loopback() {
+        eprintln!("  ⚠ Listening on a non-loopback address with no authentication.\n");
+    }
+    if addr.port() != args.port {
+        eprintln!("  Port {} was busy; using {} instead.\n", args.port, addr.port());
     }
 
-    web::run_server(default_path, args.min_size, args.depth, args.port).await?;
+    if !args.no_open {
+        if let Err(e) = open_browser(&url) {
+            eprintln!("  Could not open a browser ({e}); visit {url} yourself.");
+        }
+    }
 
-    Ok(())
+    web::serve(listener, settings).await
 }
 
 fn open_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
-    let cmd = "open";
-    #[cfg(target_os = "linux")]
-    let cmd = "xdg-open";
+    let mut cmd = std::process::Command::new("open");
     #[cfg(target_os = "windows")]
-    let cmd = "explorer";
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut cmd = std::process::Command::new("xdg-open");
 
-    std::process::Command::new(cmd).arg(url).spawn().map(|_| ())
+    cmd.arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
 }

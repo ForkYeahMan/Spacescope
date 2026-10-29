@@ -1,52 +1,61 @@
 //! Static asset serving.
 //!
-//! The frontend is split into per-page CSS and ES-module JS files. They are
-//! embedded at compile time and served through one handler keyed by path, so
-//! adding a component/page only means adding a line to `asset()`.
+//! Everything under `src/web/assets` is embedded into the binary at compile
+//! time (and read straight from disk in debug builds, so frontend edits show up
+//! on refresh). Adding a page, stylesheet or font needs no Rust changes.
 
 use axum::{
     extract::Path as AxumPath,
-    http::{header, StatusCode},
-    response::{Html, IntoResponse, Response},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
 };
+use rust_embed::RustEmbed;
 
-pub(super) async fn index() -> Html<&'static str> {
-    Html(include_str!("../assets/index.html"))
+#[derive(RustEmbed)]
+#[folder = "src/web/assets"]
+struct Assets;
+
+pub(super) async fn index(headers: HeaderMap) -> Response {
+    serve("index.html", &headers)
 }
 
-const CSS: &str = "text/css; charset=utf-8";
-const JS: &str = "application/javascript; charset=utf-8";
-
-/// Map an `/assets/<path>` request to its embedded (content-type, body).
-fn asset(path: &str) -> Option<(&'static str, &'static str)> {
-    Some(match path {
-        // stylesheets — one global base plus one file per page (non-modular)
-        "css/base.css" => (CSS, include_str!("../assets/css/base.css")),
-        "css/dashboard.css" => (CSS, include_str!("../assets/css/dashboard.css")),
-        "css/system.css" => (CSS, include_str!("../assets/css/system.css")),
-        "css/cleaner.css" => (CSS, include_str!("../assets/css/cleaner.css")),
-        // third-party (vendored so the app stays self-contained offline)
-        "js/vendor/chart.umd.js" => (JS, include_str!("../assets/js/vendor/chart.umd.js")),
-        // app shell + shared libs
-        "js/app.js" => (JS, include_str!("../assets/js/app.js")),
-        "js/lib/api.js" => (JS, include_str!("../assets/js/lib/api.js")),
-        "js/lib/format.js" => (JS, include_str!("../assets/js/lib/format.js")),
-        "js/lib/metrics.js" => (JS, include_str!("../assets/js/lib/metrics.js")),
-        // components
-        "js/components/sidebar.js" => (JS, include_str!("../assets/js/components/sidebar.js")),
-        // pages
-        "js/pages/dashboard.js" => (JS, include_str!("../assets/js/pages/dashboard.js")),
-        "js/pages/system.js" => (JS, include_str!("../assets/js/pages/system.js")),
-        "js/pages/cleaner.js" => (JS, include_str!("../assets/js/pages/cleaner.js")),
-        _ => return None,
-    })
+pub(super) async fn asset(AxumPath(path): AxumPath<String>, headers: HeaderMap) -> Response {
+    serve(&path, &headers)
 }
 
-pub(super) async fn serve_asset(AxumPath(path): AxumPath<String>) -> Response {
-    match asset(&path) {
-        Some((content_type, body)) => {
-            ([(header::CONTENT_TYPE, content_type)], body).into_response()
-        }
-        None => (StatusCode::NOT_FOUND, "Not found").into_response(),
+/// Serve one embedded file with an ETag so browsers revalidate cheaply.
+fn serve(path: &str, request: &HeaderMap) -> Response {
+    let Some(file) = Assets::get(path) else {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    };
+
+    let etag = format!("\"{}\"", hex(&file.metadata.sha256_hash()));
+    if request
+        .get(header::IF_NONE_MATCH)
+        .is_some_and(|v| v.as_bytes() == etag.as_bytes())
+    {
+        return StatusCode::NOT_MODIFIED.into_response();
     }
+
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let mut response = file.data.into_owned().into_response();
+    let headers = response.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(mime.essence_str()) {
+        headers.insert(header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&etag) {
+        headers.insert(header::ETAG, v);
+    }
+    // Fonts never change under the same name; everything else revalidates.
+    let cache = if path.starts_with("fonts/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    response
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
