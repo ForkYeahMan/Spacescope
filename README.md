@@ -1,166 +1,100 @@
-# Disk Cleaner 🧹
+<p align="center"><img src="site/logo.svg" width="72" height="72" alt="Spacescope logo"></p>
 
-A cross-platform disk-space analyzer, system monitor, and cleaner. A single Rust
-binary runs the **backend service** and serves a clean, minimalist **web UI** —
-so one command starts everything.
+# Spacescope
 
-The interface has three pages behind a sidebar:
+A local disk-space browser, live system monitor and safe cleaner. One small
+binary runs the service **and** serves the web UI — nothing to configure, no
+Node, no database, nothing leaves your machine.
 
-- **📊 Dashboard** — four live charts reading straight from your system (CPU,
-  memory, disk usage, and network I/O), updating every second.
-- **🖥️ System** — operating system, CPU, memory, storage devices, load, and a
-  health summary (with temperatures where available).
-- **🧹 Cleaner** — scan any path, get a categorized breakdown, and safely reclaim
-  space.
+**Project page:** https://forkyeahman.github.io/mac-disk-cleaner/
 
-Everything is read live via [`sysinfo`](https://crates.io/crates/sysinfo), which
-works on **macOS, Linux, and Windows**.
+- **Dashboard** — live CPU, memory, disk and network charts (last minute, hover to inspect).
+- **System** — OS, health, per-core load, memory, temperatures and every storage device.
+- **Cleaner** — scan a folder or the whole disk, then browse the result as a sunburst chart:
+  open folders to go deeper, tick anything and move it to the **Trash** (always recoverable —
+  nothing is permanently deleted).
 
-## Quick start ▶️
+Works on macOS, Linux and Windows. Light and dark themes follow your OS.
 
-One command builds and runs the whole thing (backend **and** frontend), then
-opens your browser:
+## Install
 
-```bash
-./run.sh
-```
-
-That's it. The app is now at `http://127.0.0.1:8080`.
-
-Prefer to use Cargo directly? These are equivalent:
+**From source (needs [Rust](https://rustup.rs) 1.85+):**
 
 ```bash
-cargo run --release            # build + run everything
-cargo run --release -- --port 9000 --home
+git clone https://github.com/ForkYeahMan/mac-disk-cleaner
+cd mac-disk-cleaner
+./install.sh          # or: make install   /   cargo install --path .
 ```
 
-> The frontend is embedded in and served by the same process — there is no
-> separate frontend server to start, no `npm install`, and no build step for the
-> UI.
+This puts `spacescope` in `~/.cargo/bin`. Remove it with `./uninstall.sh`.
 
-### Prerequisites
+**Prebuilt binaries:** tagged releases publish macOS, Linux and Windows
+archives on the GitHub Releases page (built by `.github/workflows/release.yml`).
 
-- Rust 1.85+ / Cargo (edition 2024)
-
-### Install as a command
+## Use
 
 ```bash
-cargo install --path .
-disk-cleaner            # run from anywhere
+spacescope            # starts on http://127.0.0.1:8080 and opens your browser
+spacescope --home     # Cleaner defaults to your home folder
+spacescope --port 9000 --no-open
 ```
 
-## Command-line options ⚙️
+Press <kbd>Ctrl-C</kbd> to stop. If the port is taken, the next free one is used.
 
-All flags are passed through by `./run.sh` as well.
+| Flag                | Description                                             | Default     |
+| ------------------- | ------------------------------------------------------- | ----------- |
+| `--port <PORT>`     | Port for the web UI                                     | `8080`      |
+| `--host <ADDR>`     | Address to listen on (non-loopback = no auth, be careful) | `127.0.0.1` |
+| `-p, --path <PATH>` | Folder pre-filled in the Cleaner                        | whole disk  |
+| `--home`            | Pre-fill the Cleaner with your home folder              | off         |
+| `-m, --min-size`    | Smallest file to list, in MB                            | `1`         |
+| `-d, --depth <N>`   | Folder levels to descend below the root (`0` = no limit) | `0`         |
+| `--no-open`         | Don't open the browser                                  | off         |
 
-| Flag                | Description                                        | Default            |
-| ------------------- | -------------------------------------------------- | ------------------ |
-| `--port <PORT>`     | Port for the web UI                                | `8080`             |
-| `--path <PATH>`     | Default path pre-filled in the Cleaner             | `/` (full disk)    |
-| `--home`            | Default the Cleaner scan to your home directory    | off                |
-| `--min-size <MB>`   | Minimum file size to display                       | `1`                |
-| `--depth <N>`       | Scan depth limit (`0` = unlimited)                 | `0`                |
-| `--no-open`         | Don't open the browser automatically               | off                |
+## Sizes
 
-Examples:
+Sizes are decimal (1 GB = 1,000,000,000 bytes), the same as Finder and System Settings. A disk
+sold as "256 GB" reports about 245 GB usable on macOS, because the OS reserves part of it.
+
+## Safety
+
+- Deleting only **moves to the Trash**; restore anything until you empty it.
+- The API only accepts paths from the current scan results, and each must still
+  resolve inside the scanned folder (no `..` or symlink escapes).
+- System files appear in the chart (they take up space) but can't be selected or deleted.
+- "Safe" means regenerated by the system or a tool: caches, temp files, build output,
+  `node_modules`, package caches and logs. Downloads, archives, old files and duplicates are
+  your data and are never pre-selected.
+- The server listens on localhost only and rejects requests with a foreign
+  `Host` header (DNS-rebinding protection).
+
+## Development
 
 ```bash
-./run.sh --port 9000            # run on a different port
-./run.sh --home                 # cleaner defaults to ~/
-./run.sh --no-open              # headless / remote use
+make dev        # debug server; frontend files are read from disk — edit and refresh
+make test       # unit tests
+make lint       # clippy + fmt
 ```
 
-## The pages 🧭
+Layout:
 
-### 📊 Dashboard — live metrics
-
-Four time-series charts polling the backend once per second:
-
-1. **CPU Usage** — total load across all cores (%)
-2. **Memory Usage** — RAM in use (%) with absolute figures
-3. **Disk Usage** — used space on the primary volume (%)
-4. **Network I/O** — download/upload throughput
-
-### 🖥️ System — information & health
-
-A refreshed-every-few-seconds snapshot of:
-
-- **OS**: name, version, kernel, architecture, hostname, uptime, boot time
-- **Processor**: model, physical/logical cores, frequency, per-core load, load average
-- **Memory**: RAM and swap usage
-- **Storage devices**: every mounted disk with filesystem, type, and usage
-- **Health**: a coarse status (healthy / needs attention / critical) derived from
-  memory pressure, swap usage, and temperature, plus per-sensor readings
-
-### 🧹 Cleaner — scan & reclaim
-
-1. Pick a scan: **Full Disk**, **Home Directory**, or a **Custom Path**.
-2. Review the results: category breakdown, largest directories, largest files,
-   and smart recommendations.
-3. Select files (or "Select safe") and delete them. Deletion is guarded so it can
-   only remove paths inside the scanned root, and always asks for confirmation.
-
-Smart categorization covers caches, temp files, logs, build artifacts,
-`node_modules`, package caches, large/old files, media, archives, and more.
-Safety indicators mark system (⚙️) and hidden (◌) files.
-
-## Architecture 🏗️
-
-```text
+```
 src/
-├── main.rs              # CLI args, launches the server, opens the browser
-├── scanner/             # parallel filesystem traversal + progress
-├── analyzer/            # categorization + recommendations
-├── cleaner/             # safe deletion
-├── models/              # shared data types (FileEntry, StorageInfo, …)
-└── web/
-    ├── server.rs        # axum routes: assets, config, metrics, scan, delete
-    ├── sysmon.rs        # cross-platform system monitor (CPU/mem/disk/net/health)
-    ├── dto.rs           # JSON payloads for the cleaner
-    └── assets/          # the frontend, embedded at compile time
-        ├── index.html
-        ├── css/         # base.css + one stylesheet per page (plain, non-modular)
-        └── js/
-            ├── app.js           # hash router + page swapping
-            ├── lib/             # api.js, format.js, charts.js (canvas charts)
-            ├── components/      # sidebar.js
-            └── pages/           # dashboard.js, system.js, cleaner.js
+  main.rs            CLI, port binding, browser launch
+  scanner/           parallel directory walk (depth, cancel, hard-link dedupe)
+  analyzer/          file categorisation and "safe to delete" rules
+  cleaner/           move-to-Trash
+  web/
+    server/          axum routes, handlers, errors, request guard, embedded assets
+    sysmon/          sysinfo-backed live metrics
+    assets/          the UI — plain ES modules, no build step
+      css/           tokens (light/dark) · base (shell, cards, controls) · charts · pages
+      js/lib/        api, store (live metrics), format, theme, tiny html``
+      js/charts/     hand-rolled SVG/HTML: line, storage bar, columns, bar rows
+      js/components/ sidebar, ui, toast, confirm dialog
+      js/pages/      dashboard, system, cleaner/{home,scanning,results}
 ```
 
-**Frontend layout:** the UI is broken into components and pages with a sidebar
-router. Styling is deliberately **separated, not modular** — plain global
-stylesheets, one per page, on a white background with a clean type scale. No
-build tooling: ES modules and CSS are served directly by the Rust backend.
+## License
 
-### HTTP API
-
-| Method | Route                | Purpose                                  |
-| ------ | -------------------- | ---------------------------------------- |
-| GET    | `/`                  | The web UI                               |
-| GET    | `/assets/*`          | Embedded CSS/JS assets                    |
-| GET    | `/api/config`        | Defaults + current storage               |
-| GET    | `/api/metrics`       | Live CPU/mem/disk/network sample         |
-| GET    | `/api/system`        | Full system info + health                |
-| POST   | `/api/scan`          | Start a scan                             |
-| GET    | `/api/scan/stream`   | Server-Sent Events scan progress         |
-| GET    | `/api/results`       | Categorized scan results                 |
-| POST   | `/api/delete`        | Delete selected paths (root-guarded)     |
-
-## Dependencies 📦
-
-- `axum` + `tokio` — web server and async runtime
-- `sysinfo` — cross-platform system metrics
-- `walkdir` — directory traversal
-- `clap` — command-line arguments
-- `serde` / `serde_json` — serialization
-- `chrono`, `humansize`, `dirs`, `libc` — dates, sizes, paths, storage stats
-
-## Safety warning ⚠️
-
-The Cleaner permanently deletes files. Always review selected items before
-confirming. Deletion is restricted to paths inside the scanned root, but you are
-responsible for what you remove — the authors are not liable for data loss.
-
-## License 📄
-
-MIT.
+MIT
