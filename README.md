@@ -6,7 +6,7 @@ A local disk-space browser, live system monitor and safe cleaner. One small
 binary runs the service **and** serves the web UI — nothing to configure, no
 Node, no database, nothing leaves your machine.
 
-**Project page:** https://forkyeahman.github.io/mac-disk-cleaner/
+**Project page:** https://forkyeahman.github.io/Spacescope/
 
 - **Dashboard** — live CPU, memory, disk and network charts (last minute, hover to inspect).
 - **System** — OS, health, per-core load, memory, temperatures and every storage device.
@@ -21,8 +21,8 @@ Works on macOS, Linux and Windows. Light and dark themes follow your OS.
 **From source (needs [Rust](https://rustup.rs) 1.85+):**
 
 ```bash
-git clone https://github.com/ForkYeahMan/mac-disk-cleaner
-cd mac-disk-cleaner
+git clone https://github.com/ForkYeahMan/Spacescope
+cd Spacescope
 ./install.sh          # or: make install   /   cargo install --path .
 ```
 
