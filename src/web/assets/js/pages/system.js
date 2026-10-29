@@ -1,214 +1,159 @@
-// System page — OS, health, processor, memory and storage. System Health and
-// the Processor are shown as Chart.js bar charts. The DOM skeleton is built once
-// and then updated in place every few seconds, so the charts don't flicker.
-//
-/* global Chart */ // provided by the vendored UMD build loaded in index.html
+// System — operating system, health, processor, memory, storage and sensors.
+// The page skeleton is built once; each poll then updates its sections in place.
 
+import { html, setHtml } from "../lib/dom.js";
 import { getSystem } from "../lib/api.js";
-import { fmtBytes, fmtUptime, fmtDate, fmtPct, esc } from "../lib/format.js";
+import { bytes, pct, uptime, dateTime, loadColor } from "../lib/format.js";
+import { barRow, gauge } from "../charts/bars.js";
+import { columns } from "../charts/columns.js";
+import { pageHead, panel, metricGrid, setMetric, empty, banner } from "../components/ui.js";
 
 const POLL_MS = 3000;
-const GRID = "#eeeeee";
-const ACCENT = "#4f46e5";
+const HEALTH = {
+  healthy: ["green", "Healthy"],
+  warning: ["amber", "Needs attention"],
+  critical: ["red", "Critical"],
+};
+
+const kv = (rows) => html`<dl class="kv">${rows.map(([k, v]) => html`<dt>${k}</dt><dd>${v || "—"}</dd>`)}</dl>`;
 
 export async function mount(view) {
-  view.innerHTML = `
-    <div class="page-head">
-      <h1>System</h1>
-      <div class="sub">Hardware, operating system and health at a glance.</div>
-    </div>
-    <div id="sys-body"><div class="empty">Loading system information…</div></div>
-  `;
+  setHtml(view, html`
+    ${pageHead({ title: "System" })}
+    <div id="sys-error"></div>
+    <div id="sys-body" class="view-stack"></div>`);
   const body = view.querySelector("#sys-body");
-  const charts = {};
-  let built = false;
+  const errorSlot = view.querySelector("#sys-error");
+  let cores = null;
+  let timer = null;
+  let stopped = false;
+  let controller = null;
 
-  async function refresh() {
-    let s;
-    try {
-      s = await getSystem();
-    } catch (e) {
-      destroyCharts(charts);
-      built = false;
-      body.innerHTML = `<div class="empty">Could not read system info: ${esc(e.message)}</div>`;
-      return;
-    }
-    if (!built) {
-      body.innerHTML = skeleton(s);
-      createCharts(s, charts, body);
-      built = true;
-    }
-    apply(s, charts, body);
+  function build(s) {
+    setHtml(body, html`
+      ${metricGrid([
+        { id: "cpu", label: "CPU" },
+        { id: "ram", label: "Memory" },
+        { id: "swap", label: "Swap" },
+        { id: "load", label: "Load average" },
+        { id: "uptime", label: "Uptime" },
+      ])}
+      <div class="grid-2">
+        ${panel({ title: "Operating system", body: html`<div id="os"></div>` })}
+        ${panel({ title: "Health", actions: html`<span id="health-pill"></span>`, body: html`<div id="health"></div>` })}
+      </div>
+      <div>${panel({
+        title: "Processor",
+        caption: s.cpu.brand || "Unknown CPU",
+        body: html`<div class="grid-wide" style="grid-template-columns:minmax(0,1fr) minmax(0,2fr)"><div id="cpu-kv"></div><div><div class="muted" style="margin-bottom:8px">Load per core</div><div id="core-chart"></div></div></div>`,
+      })}</div>
+      ${panel({ title: "Memory", body: html`<div id="mem" class="bar-rows"></div>` })}
+      ${panel({ title: "Temperatures", actions: html`<button type="button" class="btn btn-sm" id="temps-toggle" hidden></button>`, body: html`<div id="temps"></div>` })}
+      <div>${panel({ title: "Disks", body: html`<div id="disks" class="bar-rows"></div>` })}</div>`);
+    cores = columns(body.querySelector("#core-chart"), { title: "CPU load per core", height: 130 });
+    body.querySelector("#temps-toggle").addEventListener("click", () => { showAllTemps = !showAllTemps; drawTemps(lastTemps); });
   }
 
-  await refresh();
-  const timer = setInterval(refresh, POLL_MS);
-  return () => {
+  // Temperatures as gauges: 0–110 °C, green below 60, amber below 80, red above.
+  let showAllTemps = false;
+  let lastTemps = [];
+  function drawTemps(temps) {
+    lastTemps = temps.filter((t) => t.celsius > 0 && t.celsius < 150).sort((a, b) => b.celsius - a.celsius);
+    const limit = 12;
+    const shown = showAllTemps ? lastTemps : lastTemps.slice(0, limit);
+    const toggle = body.querySelector("#temps-toggle");
+    toggle.hidden = lastTemps.length <= limit;
+    toggle.textContent = showAllTemps ? "Show fewer" : `Show all ${lastTemps.length}`;
+    setHtml(body.querySelector("#temps"), shown.length
+      ? html`<div class="gauge-grid">${shown.map((t) => gauge({
+        percent: Math.min(100, (t.celsius / 110) * 100),
+        color: t.celsius >= 80 ? "var(--red)" : t.celsius >= 60 ? "var(--amber)" : "var(--green)",
+        value: `${t.celsius.toFixed(0)}°C`,
+        caption: t.label,
+        small: true,
+      }))}</div>`
+      : empty("No temperature sensors available", "This system doesn't report temperatures."));
+  }
+
+  function apply(s) {
+    const $ = (sel) => body.querySelector(sel);
+    const worstDisk = Math.max(0, ...(s.disks ?? []).map((d) => d.percent));
+
+    setMetric(body, "cpu", pct(s.cpu.usage), `${s.cpu.logical_cores} logical cores`);
+    setMetric(body, "ram", pct(s.memory.percent), `${bytes(s.memory.used)} of ${bytes(s.memory.total)}`);
+    setMetric(body, "swap", s.memory.swap_total ? pct(s.memory.swap_percent) : "Off", s.memory.swap_total ? `${bytes(s.memory.swap_used)} of ${bytes(s.memory.swap_total)}` : "Not configured");
+    setMetric(body, "load", s.load.one.toFixed(2), `${s.load.five.toFixed(2)} (5m) · ${s.load.fifteen.toFixed(2)} (15m)`);
+    setMetric(body, "uptime", uptime(s.os.uptime), `Since ${dateTime(s.os.boot_time)}`);
+
+    setHtml($("#os"), kv([
+      ["System", s.os.name], ["Version", s.os.os_version], ["Kernel", s.os.kernel],
+      ["Architecture", s.os.arch], ["Hostname", s.os.hostname],
+    ]));
+
+    const [tone, label] = HEALTH[s.health.status] ?? HEALTH.healthy;
+    setHtml($("#health-pill"), html`<span class="pill ${tone}">${label}</span>`);
+    setHtml($("#health"), html`
+      ${(s.health.issues ?? []).length
+        ? html`<ul class="issues">${s.health.issues.map((i) => html`<li>${i}</li>`)}</ul>`
+        : html`<p class="muted" style="margin-bottom:16px">No problems detected.</p>`}
+      <div class="bar-rows">
+        ${[["CPU", s.cpu.usage], ["Memory", s.memory.percent], ["Swap", s.memory.swap_percent], ["Busiest disk", worstDisk]].map(([name, v]) =>
+          barRow({ name, meta: html`<b class="nums">${pct(v)}</b>`, percent: v, color: loadColor(v) }))}
+      </div>`);
+
+    setHtml($("#cpu-kv"), kv([
+      ["Cores", `${s.cpu.physical_cores} physical · ${s.cpu.logical_cores} logical`],
+      ["Frequency", `${(s.cpu.frequency_mhz / 1000).toFixed(2)} GHz`],
+      ["Total load", pct(s.cpu.usage)],
+    ]));
+    cores.update((s.cpu.per_core ?? []).map((v) => Math.min(100, v)));
+
+    setHtml($("#mem"), html`
+      ${barRow({ name: "RAM", meta: html`<b class="nums">${bytes(s.memory.used)}</b> / ${bytes(s.memory.total)} · ${pct(s.memory.percent)}`, percent: s.memory.percent, color: loadColor(s.memory.percent) })}
+      ${barRow({ name: "Swap", meta: s.memory.swap_total ? html`<b class="nums">${bytes(s.memory.swap_used)}</b> / ${bytes(s.memory.swap_total)} · ${pct(s.memory.swap_percent)}` : "not configured", percent: s.memory.swap_percent, color: "var(--series-4)" })}`);
+
+    drawTemps(s.temperatures ?? []);
+
+    setHtml($("#disks"), (s.disks ?? []).length
+      ? s.disks.map((d) => barRow({
+        name: d.mount,
+        meta: html`<b class="nums">${bytes(d.used)}</b> / ${bytes(d.total)} · ${pct(d.percent)}`,
+        percent: d.percent, color: loadColor(d.percent),
+        sub: [d.fs, d.kind, d.name].filter(Boolean).join(" · "),
+      }))
+      : empty("No disks reported"));
+  }
+
+  async function refresh() {
+    controller = new AbortController();
+    try {
+      const s = await getSystem(controller.signal);
+      if (stopped) return;
+      errorSlot.replaceChildren();
+      if (!cores) build(s);
+      apply(s);
+    } catch (e) {
+      if (e.name === "AbortError" || stopped) return;
+      setHtml(errorSlot, banner({ kind: "error", title: "Couldn't read system information", message: e.message, retry: true }));
+      errorSlot.querySelector("[data-retry]").addEventListener("click", refresh);
+    }
+  }
+
+  function schedule() {
     clearInterval(timer);
-    destroyCharts(charts);
+    timer = document.hidden ? null : setInterval(refresh, POLL_MS);
+  }
+  const onVisibility = () => { schedule(); if (!document.hidden) refresh(); };
+  document.addEventListener("visibilitychange", onVisibility);
+
+  await refresh();
+  schedule();
+
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+    controller?.abort();
+    cores?.destroy();
+    document.removeEventListener("visibilitychange", onVisibility);
   };
-}
-
-// ---------- structure (built once) ----------
-function skeleton(s) {
-  return `
-    <div class="sys-grid">
-      <div class="card"><h3>Operating System</h3><div class="kv" id="os-kv"></div></div>
-      <div class="card health-card">
-        <div class="health-head"><h3>System Health</h3><span id="health-status"></span></div>
-        <div id="health-text"></div>
-        <div class="sys-chart health-chart"><canvas id="health-bar"></canvas></div>
-      </div>
-    </div>
-    <div class="card">
-      <h3>Processor</h3>
-      <div class="cpu-brand">${esc(s.cpu.brand || "Unknown CPU")}</div>
-      <div class="kv" id="cpu-kv"></div>
-      <div class="sys-chart core-chart"><canvas id="core-bar"></canvas></div>
-    </div>
-    <div class="card"><h3>Memory</h3><div class="mem-row" id="mem-body"></div></div>
-    <div class="card"><h3>Storage Devices</h3><div class="disks" id="disks-body"></div></div>
-  `;
-}
-
-// ---------- charts ----------
-function healthValues(s) {
-  const maxDisk = (s.disks || []).reduce((m, d) => Math.max(m, d.percent || 0), 0);
-  return {
-    labels: ["CPU", "RAM", "Swap", "Storage"],
-    values: [s.cpu.usage || 0, s.memory.percent || 0, s.memory.swap_percent || 0, maxDisk],
-  };
-}
-
-function createCharts(s, charts, body) {
-  const hv = healthValues(s);
-  charts.health = new Chart(body.querySelector("#health-bar"), {
-    type: "bar",
-    data: {
-      labels: hv.labels,
-      datasets: [{ data: hv.values, backgroundColor: hv.values.map(barColor), borderWidth: 0, barThickness: 20 }],
-    },
-    options: barOpts("y"),
-  });
-
-  const cores = s.cpu.per_core || [];
-  charts.core = new Chart(body.querySelector("#core-bar"), {
-    type: "bar",
-    data: {
-      labels: cores.map((_, i) => `#${i}`),
-      datasets: [{ data: cores.map((v) => Math.min(100, v)), backgroundColor: ACCENT, borderWidth: 0 }],
-    },
-    options: barOpts("x"),
-  });
-}
-
-function barOpts(indexAxis) {
-  const pctAxis = {
-    min: 0, max: 100,
-    grid: { color: GRID }, border: { display: false },
-    ticks: { callback: (v) => `${v}%`, font: { size: 10 }, color: "#9a9a9a", stepSize: 25 },
-  };
-  const catAxis = {
-    grid: { display: false }, border: { display: false },
-    ticks: { font: { size: 11 }, color: "#626262" },
-  };
-  return {
-    responsive: true,
-    maintainAspectRatio: false,
-    animation: false,
-    indexAxis,
-    scales: indexAxis === "y" ? { x: pctAxis, y: catAxis } : { y: pctAxis, x: catAxis },
-    plugins: {
-      legend: { display: false },
-      tooltip: { callbacks: { label: (ctx) => `${ctx.raw.toFixed(0)}%` } },
-    },
-  };
-}
-
-function destroyCharts(charts) {
-  Object.values(charts).forEach((c) => { try { c.destroy(); } catch (_) {} });
-}
-
-// ---------- per-poll updates ----------
-function apply(s, charts, body) {
-  body.querySelector("#os-kv").innerHTML = kvRows([
-    ["OS", s.os.name],
-    ["Version", s.os.os_version],
-    ["Kernel", s.os.kernel],
-    ["Architecture", s.os.arch],
-    ["Hostname", s.os.hostname],
-    ["Uptime", fmtUptime(s.os.uptime)],
-    ["Booted", fmtDate(s.os.boot_time)],
-  ]);
-
-  body.querySelector("#health-status").innerHTML = statusPill(s.health.status);
-  body.querySelector("#health-text").innerHTML = healthText(s.health);
-  const hv = healthValues(s);
-  charts.health.data.datasets[0].data = hv.values;
-  charts.health.data.datasets[0].backgroundColor = hv.values.map(barColor);
-  charts.health.update("none");
-
-  body.querySelector("#cpu-kv").innerHTML = kvRows([
-    ["Cores", `${s.cpu.physical_cores} physical · ${s.cpu.logical_cores} logical`],
-    ["Frequency", `${(s.cpu.frequency_mhz / 1000).toFixed(2)} GHz`],
-    ["Total load", fmtPct(s.cpu.usage)],
-    ["Load avg", `${s.load.one.toFixed(2)} · ${s.load.five.toFixed(2)} · ${s.load.fifteen.toFixed(2)}`],
-  ]);
-  const cores = s.cpu.per_core || [];
-  charts.core.data.labels = cores.map((_, i) => `#${i}`);
-  charts.core.data.datasets[0].data = cores.map((v) => Math.min(100, v));
-  charts.core.update("none");
-
-  body.querySelector("#mem-body").innerHTML =
-    meter("RAM", s.memory.used, s.memory.total, s.memory.percent, "var(--ink)") +
-    meter("Swap", s.memory.swap_used, s.memory.swap_total, s.memory.swap_percent, "var(--ink-soft)");
-
-  body.querySelector("#disks-body").innerHTML =
-    (s.disks || []).map(diskRow).join("") || `<div class="empty">No disks reported.</div>`;
-}
-
-// ---------- small render helpers ----------
-function kvRows(rows) {
-  return rows.map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v || "—")}</div>`).join("");
-}
-
-function statusPill(status) {
-  const map = { healthy: ["green", "Healthy"], warning: ["amber", "Attention"], critical: ["red", "Critical"] };
-  const [cls, label] = map[status] || map.healthy;
-  return `<span class="pill ${cls}">${label}</span>`;
-}
-
-function healthText(health) {
-  return (health.issues || []).length
-    ? `<ul class="issue-list">${health.issues.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`
-    : `<div class="all-good">No problems detected.</div>`;
-}
-
-function meter(label, used, total, pct, color) {
-  return `
-    <div class="meter">
-      <div class="meter-head">
-        <span>${label}</span>
-        <span class="meter-nums">${fmtBytes(used)} / ${fmtBytes(total)} · ${fmtPct(pct)}</span>
-      </div>
-      <div class="track"><div class="fill" style="width:${Math.min(100, pct)}%;background:${color}"></div></div>
-    </div>`;
-}
-
-function diskRow(d) {
-  return `
-    <div class="disk-row">
-      <div class="disk-main">
-        <div class="disk-mount mono">${esc(d.mount)}</div>
-        <div class="disk-meta">${esc(d.fs)} · ${esc(d.kind)} · ${esc(d.name) || "disk"}</div>
-      </div>
-      <div class="disk-bar"><div class="fill" style="width:${Math.min(100, d.percent)}%;background:${barColor(d.percent)}"></div></div>
-      <div class="disk-nums">${fmtBytes(d.used)} / ${fmtBytes(d.total)} <span class="disk-pct">${fmtPct(d.percent)}</span></div>
-    </div>`;
-}
-
-function barColor(pct) {
-  if (pct >= 90) return "#dc2626";
-  if (pct >= 75) return "#d97706";
-  return "#16a34a";
 }

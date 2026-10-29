@@ -1,51 +1,82 @@
-// App entry point: hash-based router that swaps pages into <main> and keeps
-// the sidebar in sync. Each page module exports `mount(view)` and returns an
-// optional cleanup function that the router calls before navigating away.
+// App entry: mounts the sidebar, starts live metrics and routes between pages.
+// A page module exports `mount(view, ctx)` and may return a cleanup function.
 
-import { renderSidebar } from "./components/sidebar.js";
-import { startMetrics } from "./lib/metrics.js";
-import { mount as mountDashboard } from "./pages/dashboard.js";
-import { mount as mountSystem } from "./pages/system.js";
-import { mount as mountCleaner } from "./pages/cleaner.js";
+import { getConfig } from "./lib/api.js";
+import { startMetrics, subscribe } from "./lib/store.js";
+import { currentRoute, navigate } from "./lib/router.js";
+import "./lib/theme.js";
+import { mountSidebar, NAV } from "./components/sidebar.js";
+import { notify, dismiss } from "./components/notify.js";
+import { mount as dashboard } from "./pages/dashboard.js";
+import { mount as system } from "./pages/system.js";
+import { mount as cleaner } from "./pages/cleaner/index.js";
+import { setHtml } from "./lib/dom.js";
+import { banner } from "./components/ui.js";
 
-const ROUTES = {
-  dashboard: mountDashboard,
-  system: mountSystem,
-  cleaner: mountCleaner,
-};
-const DEFAULT = "dashboard";
+const PAGES = { dashboard, system, cleaner };
+const view = document.getElementById("view");
 
-const sidebarEl = document.getElementById("sidebar");
-const viewEl = document.getElementById("view");
+let config;
+let sidebar;
 let cleanup = null;
-
-function currentRoute() {
-  const id = location.hash.replace(/^#\/?/, "");
-  return ROUTES[id] ? id : DEFAULT;
-}
-
-function navigate(id) {
-  if (location.hash === `#/${id}`) render();
-  else location.hash = `#/${id}`;
-}
+let renderToken = 0;
 
 async function render() {
-  const id = currentRoute();
-  if (typeof cleanup === "function") {
-    try { cleanup(); } catch (_) {}
-    cleanup = null;
-  }
-  renderSidebar(sidebarEl, id, navigate);
-  viewEl.innerHTML = "";
+  const route = currentRoute();
+  if (!(route.page in PAGES)) return navigate(NAV[0].id, { replace: true });
+
+  const token = ++renderToken;
+  cleanup?.();
+  cleanup = null;
+  sidebar.setActive(route.page);
+  document.title = `${NAV.find((n) => n.id === route.page).label} · Spacescope`;
+  // Each mount gets its own container, so listeners a page attaches to it go
+  // away with it. `display: contents` keeps its children in the page grid.
+  const stage = document.createElement("div");
+  stage.className = "stage";
+  view.replaceChildren(stage);
+  window.scrollTo(0, 0);
+
   try {
-    cleanup = await ROUTES[id](viewEl);
+    const teardown = await PAGES[route.page](stage, { config, route, navigate });
+    // A newer navigation won while this page was loading: discard it.
+    if (token !== renderToken) teardown?.();
+    else cleanup = teardown ?? null;
   } catch (e) {
-    viewEl.innerHTML = `<div class="empty">Failed to load page: ${e.message}</div>`;
+    console.error(e);
+    if (token !== renderToken) return;
+    setHtml(stage, banner({ kind: "error", title: "This page couldn't load", message: e.message, retry: true }));
+    stage.querySelector("[data-retry]")?.addEventListener("click", render);
   }
 }
 
-// Poll metrics for the whole app lifetime so history persists across pages.
-startMetrics();
+/** Tell the user once when the service goes away, and once when it's back. */
+function watchConnection() {
+  let lostId = null;
+  subscribe(({ online }) => {
+    if (!online && lostId === null) {
+      lostId = notify({ kind: "error", title: "Connection lost", message: "The service stopped responding.", sticky: true });
+    } else if (online && lostId !== null) {
+      dismiss(lostId);
+      lostId = null;
+    }
+  });
+}
 
-window.addEventListener("hashchange", render);
-render();
+async function boot() {
+  try {
+    config = await getConfig();
+  } catch (e) {
+    setHtml(view, banner({ kind: "error", title: "Can't reach Spacescope", message: e.message, retry: true }));
+    view.querySelector("[data-retry]")?.addEventListener("click", () => location.reload());
+    return;
+  }
+  sidebar = mountSidebar(document.getElementById("sidebar"));
+  startMetrics();
+  watchConnection();
+  window.addEventListener("hashchange", render);
+  window.addEventListener("unhandledrejection", (e) => notify({ kind: "error", title: "Unexpected error", message: e.reason?.message ?? String(e.reason) }));
+  render();
+}
+
+boot();

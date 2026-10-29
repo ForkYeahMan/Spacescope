@@ -1,0 +1,78 @@
+/* tokens.css — colour, type and motion tokens.
+   Dosis for reading, DynaPuff for names and numbers; ink is the primary colour and
+   the Fefe orange survives as --brand and the first chart series.
+   Dark mode follows the OS unless html[data-theme] says otherwise. */
+
+@font-face { font-family: Dosis; font-weight: 400; font-display: swap; src: url("/assets/fonts/dosis-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: Dosis; font-weight: 500; font-display: swap; src: url("/assets/fonts/dosis-latin-500-normal.woff2") format("woff2"); }
+@font-face { font-family: Dosis; font-weight: 600; font-display: swap; src: url("/assets/fonts/dosis-latin-600-normal.woff2") format("woff2"); }
+@font-face { font-family: Dosis; font-weight: 700; font-display: swap; src: url("/assets/fonts/dosis-latin-700-normal.woff2") format("woff2"); }
+@font-face { font-family: DynaPuff; font-weight: 400; font-display: swap; src: url("/assets/fonts/dynapuff-latin-400-normal.woff2") format("woff2"); }
+@font-face { font-family: DynaPuff; font-weight: 600; font-display: swap; src: url("/assets/fonts/dynapuff-latin-600-normal.woff2") format("woff2"); }
+
+:root {
+  color-scheme: light;
+
+  --font: Dosis, system-ui, sans-serif;
+  --display: DynaPuff, Dosis, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* categorical series, assigned in order */
+  --series-1: #f7941e;
+  --series-2: #1baf7a;
+  --series-3: #8a63b8;
+  --series-4: #e87ba4;
+  --series-5: #eda100;
+  --series-6: #2a78d6;
+  --series-7: #eb6834;
+  --series-8: #6f7a86;
+
+  --page: #ffffff;
+  --bg: #ffffff;
+  --canvas: #f4f4f3;
+  --ink: #3a3a3a;
+  --ink-2: #5c5c5a;
+  --ink-strong: #1f1f1f;
+  --on-ink: #ffffff;
+  --muted-ink: #8a8a88;
+  --line: #c4c4c4;
+  --line-soft: #e2e2e0;
+  --grid: #e7e7e4;
+
+  --brand: #f7941e;
+  --green: #16a34a;
+  --amber: #b07d1a;
+  --red: #dc2626;
+  --skip: #b4b4b0;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --shadow-pop: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+  --sidebar-w: 232px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --series-1: #f79a2b; --series-2: #199e70; --series-3: #9a7bc9; --series-4: #d55181;
+    --series-5: #c98500; --series-6: #3987e5; --series-7: #d95926; --series-8: #8b95a1;
+    --page: #18181b; --bg: #18181b; --canvas: #1d1d20;
+    --ink: #c4c4c0; --ink-2: #a3a3a0; --ink-strong: #ececea; --on-ink: #18181b; --muted-ink: #7d7d7a;
+    --line: #3a3a38; --line-soft: #2a2a28; --grid: #2a2a28;
+    --brand: #f79a2b; --green: #22c55e; --amber: #b8862a; --red: #f05a5a; --skip: #55554f;
+    --shadow-pop: 0 25px 50px -12px rgb(0 0 0 / 0.6);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --series-1: #f79a2b; --series-2: #199e70; --series-3: #9a7bc9; --series-4: #d55181;
+  --series-5: #c98500; --series-6: #3987e5; --series-7: #d95926; --series-8: #8b95a1;
+  --page: #18181b; --bg: #18181b; --canvas: #1d1d20;
+  --ink: #c4c4c0; --ink-2: #a3a3a0; --ink-strong: #ececea; --on-ink: #18181b; --muted-ink: #7d7d7a;
+  --line: #3a3a38; --line-soft: #2a2a28; --grid: #2a2a28;
+  --brand: #f79a2b; --green: #22c55e; --amber: #b8862a; --red: #f05a5a; --skip: #55554f;
+  --shadow-pop: 0 25px 50px -12px rgb(0 0 0 / 0.6);
+}

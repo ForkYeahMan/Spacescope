@@ -1,0 +1,103 @@
+/* charts.css — every chart is a block that fills its container's width. */
+
+.viz { display: grid; gap: 10px; width: 100%; }
+
+/* ---- line chart ---- */
+.lines-legend { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 20px; min-height: 34px; }
+.lines-legend span { display: inline-flex; align-items: baseline; gap: 8px; color: var(--ink-2); font-size: 13px; }
+.lines-legend i { align-self: center; width: 10px; height: 3px; border-radius: 2px; }
+.lines-legend b { font: 400 22px/1.2 var(--display); font-variant-numeric: tabular-nums; }
+.lines-legend .when { color: var(--muted-ink); margin-left: auto; }
+.lines { position: relative; width: 100%; }
+.lines svg { display: block; width: 100%; overflow: visible; touch-action: pan-y; }
+.lines-max { position: absolute; top: 0; left: 0; color: var(--muted-ink); font-size: 11px; }
+.gridline { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 2 4; }
+.axis { stroke: var(--line); stroke-width: 1; }
+.crosshair { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 3 3; }
+.axis-ends { display: flex; justify-content: space-between; color: var(--muted-ink); font-size: 11px; }
+
+/* ---- storage bar: one full-width segmented bar, then a row per segment ---- */
+.sbar { display: flex; gap: 2px; width: 100%; height: 22px; border-radius: 7px; overflow: hidden; background: var(--canvas); }
+.sbar > i { display: block; flex: var(--v) 1 0; min-width: 3px; background: var(--c); transition: opacity 150ms ease-out; }
+.sbar > i.dim, .srow.dim { opacity: 0.35; }
+.srows { display: grid; margin: 12px 0 0; padding: 0; list-style: none; }
+.srow {
+  all: unset; box-sizing: border-box; display: grid; grid-template-columns: 12px minmax(0, 1fr) auto 3.4em; align-items: center; gap: 12px;
+  width: 100%; min-height: 40px; padding: 0 2px; box-shadow: inset 0 -0.5px 0 var(--line-soft); transition: opacity 150ms ease-out;
+}
+li:last-child > .srow { box-shadow: none; }
+.srow .sw { width: 12px; height: 12px; border-radius: 4px; background: var(--c); }
+.srow .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-strong); }
+.srow .val { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.srow .share { text-align: right; color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+button.srow { cursor: pointer; }
+button.srow[aria-pressed="true"] .name { color: var(--ink); font-weight: 600; }
+button.srow:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; border-radius: 6px; }
+.srow .name small { margin-left: 8px; color: var(--green); font-size: 12px; }
+
+/* ---- columns (per-core load) ---- */
+.cols { width: 100%; }
+.cols svg { display: block; width: 100%; overflow: visible; }
+.cols .tick { fill: var(--muted-ink); font-size: 10px; }
+.col-bar { transition: y 250ms var(--ease-out), height 250ms var(--ease-out), fill 250ms ease-out; }
+
+/* ---- bar rows ---- */
+.bar-rows { display: grid; gap: 16px; }
+.bar-row { display: grid; gap: 6px; min-width: 0; }
+.bar-row-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-width: 0; }
+.bar-row-head .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-strong); }
+.bar-row-head .meta { flex: none; color: var(--ink-2); font-size: 14px; font-variant-numeric: tabular-nums; }
+.bar-row-head .meta b { font-weight: 500; }
+.bar-row .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-ink); font-size: 13px; }
+.track { height: 8px; border-radius: 999px; background: var(--canvas); overflow: hidden; box-shadow: inset 0 0 0 1px var(--line-soft); }
+.track > i { display: block; height: 100%; width: var(--w, 0%); border-radius: 999px; background: var(--c, var(--series-1)); transition: width 400ms var(--ease-out), background-color 200ms ease-out; }
+button.bar-row { all: unset; box-sizing: border-box; display: grid; gap: 6px; padding: 8px 10px; margin: -8px -10px; border-radius: var(--r-sm); cursor: pointer; transition: background-color 120ms ease-out; }
+button.bar-row[aria-pressed="true"] { background: var(--line-soft); }
+button.bar-row:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) { button.bar-row:hover:not([aria-pressed="true"]) { background: var(--canvas); } }
+
+.stack { display: flex; gap: 2px; height: 22px; border-radius: 7px; overflow: hidden; background: var(--canvas); }
+.stack > i { display: block; flex: var(--v) 1 0; min-width: 3px; background: var(--c); }
+.stack-legend { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 10px; color: var(--ink-2); font-size: 13px; }
+.stack-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.stack-legend b { font-weight: 500; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 600px) { .srow .name small { display: none; } }
+
+/* ---- donut: ring on the left, legend filling the rest of the row ---- */
+.donut { display: grid; grid-template-columns: clamp(188px, 30%, 260px) minmax(0, 1fr); align-items: center; gap: 28px; width: 100%; }
+@media (max-width: 620px) { .donut { grid-template-columns: minmax(0, 1fr); justify-items: center; } .donut .fig { width: min(260px, 100%); } }
+.donut .fig { position: relative; width: 100%; aspect-ratio: 1; }
+.donut svg { display: block; width: 100%; height: 100%; }
+.donut-slice { transition: opacity 150ms ease-out, translate 150ms var(--ease-out); }
+.donut-slice.dim, .legend-row.dim { opacity: 0.4; }
+.donut-slice.on { translate: var(--tx, 0) var(--ty, 0); }
+.donut-center { position: absolute; inset: 29%; display: grid; place-items: center; align-content: center; text-align: center; }
+.donut-center b { font: 400 22px/1.15 var(--display); font-variant-numeric: tabular-nums; }
+.donut-center span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted-ink); font-size: 13px; }
+.legend-list { display: grid; margin: 0; padding: 0; list-style: none; min-width: 0; width: 100%; }
+.legend-row, button.legend-row {
+  all: unset; box-sizing: border-box; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto 3.4em; align-items: center; gap: 4px 12px;
+  width: 100%; padding: 6px 8px; border-radius: 6px; transition: opacity 150ms ease-out, background-color 120ms ease-out;
+}
+.legend-row .sq { width: 10px; height: 10px; border-radius: 3px; background: var(--c); }
+.legend-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-strong); }
+.legend-row .val { color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.legend-row .share { text-align: right; color: var(--muted-ink); font-variant-numeric: tabular-nums; }
+button.legend-row { cursor: pointer; }
+.legend-row[aria-pressed="true"] { background: var(--canvas); box-shadow: inset 2px 0 0 var(--c); }
+button.legend-row:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) { .legend-row.on { background: var(--canvas); } }
+
+/* ---- gauge ---- */
+.gauge { position: relative; width: 100%; max-width: 260px; margin: 0 auto; }
+.gauge svg { display: block; width: 100%; height: auto; }
+.gauge-track { stroke: var(--canvas); }
+.gauge-center { position: absolute; inset: auto 0 2px 0; display: grid; justify-items: center; }
+.gauge-value { font: 400 32px/1.1 var(--display); color: var(--ink-strong); font-variant-numeric: tabular-nums; }
+.gauge-caption { color: var(--muted-ink); font-size: 13px; }
+
+.gauge.sm { max-width: none; }
+.gauge.sm .gauge-value { font-size: 20px; }
+.gauge.sm .gauge-caption { max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.gauge-grid { display: grid; gap: 20px 16px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }

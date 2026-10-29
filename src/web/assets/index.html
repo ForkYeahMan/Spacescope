@@ -3,34 +3,29 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Disk Cleaner</title>
+  <meta name="color-scheme" content="light dark" />
+  <title>Spacescope</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/logo.svg" />
+  <!-- Apply the saved theme before first paint to avoid a flash. -->
+  <script>
+    try {
+      const t = JSON.parse(localStorage.getItem("spacescope:theme"));
+      if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    } catch (_) {}
+  </script>
+  <link rel="preload" href="/assets/fonts/dosis-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/assets/css/tokens.css" />
   <link rel="stylesheet" href="/assets/css/base.css" />
-  <link rel="stylesheet" href="/assets/css/dashboard.css" />
-  <link rel="stylesheet" href="/assets/css/system.css" />
-  <link rel="stylesheet" href="/assets/css/cleaner.css" />
+  <link rel="stylesheet" href="/assets/css/charts.css" />
+  <link rel="stylesheet" href="/assets/css/pages.css" />
 </head>
 <body>
   <div class="layout">
     <aside id="sidebar" class="sidebar"></aside>
-    <main id="view" class="view"></main>
+    <main id="view" class="view" tabindex="-1"></main>
   </div>
-
-  <!-- Confirmation modal (used by the cleaner page) -->
-  <div id="modal" class="modal hidden">
-    <div class="modal-card">
-      <h2 id="modal-title">Confirm deletion</h2>
-      <p id="modal-body"></p>
-      <div class="modal-actions">
-        <button type="button" id="modal-cancel" class="btn btn-ghost">Cancel</button>
-        <button type="button" id="modal-confirm" class="btn btn-danger">Delete</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="toast" class="toast hidden"></div>
-
-  <!-- Chart.js (vendored, UMD) exposes a global `Chart` before the app boots. -->
-  <script src="/assets/js/vendor/chart.umd.js"></script>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+  <noscript><p style="padding:2rem">Spacescope needs JavaScript to run.</p></noscript>
   <script type="module" src="/assets/js/app.js"></script>
 </body>
 </html>

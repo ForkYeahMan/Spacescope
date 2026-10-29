@@ -1,38 +1,47 @@
-// Thin fetch wrapper + typed endpoints for the backend JSON/SSE API.
+// Thin fetch wrapper and typed endpoints for the backend JSON/SSE API.
 
-export async function api(path, opts) {
-  const res = await fetch(path, opts);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
-  return body;
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
 }
 
-export const getConfig = () => api("/api/config");
-export const getMetrics = () => api("/api/metrics");
-export const getSystem = () => api("/api/system");
-export const getResults = () => api("/api/results");
-
-export function startScan(payload) {
-  return api("/api/scan", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+async function request(path, { method = "GET", body, signal } = {}) {
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      signal,
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") throw e;
+    throw new ApiError("Can't reach the Spacescope service. Is it still running?", 0);
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(data.error || `Request failed (${res.status})`, res.status);
+  return data;
 }
 
-export function deletePaths(paths) {
-  return api("/api/delete", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ paths }),
-  });
-}
+export const getConfig = () => request("/api/config");
+export const getMetrics = (signal) => request("/api/metrics", { signal });
+export const getSystem = (signal) => request("/api/system", { signal });
+export const getTree = (path) => request(`/api/tree${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+export const getResults = () => request("/api/results");
+export const startScan = (payload) => request("/api/scan", { method: "POST", body: payload });
+export const getScanStatus = () => request("/api/scan/status");
+export const cancelScan = () => request("/api/scan/cancel", { method: "POST" });
+export const deletePaths = (paths, authorize = false) => request("/api/delete", { method: "POST", body: { paths, authorize } });
 
-// Toast helper (shared element in index.html).
-export function toast(msg, kind) {
-  const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.className = "toast " + (kind || "");
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.add("hidden"), 3500);
+/** Open the scan progress stream. Returns a function that closes it. */
+export function watchScan({ onProgress, onError }) {
+  const source = new EventSource("/api/scan/stream");
+  source.onmessage = (ev) => {
+    try { onProgress(JSON.parse(ev.data)); } catch { /* ignore a malformed frame */ }
+  };
+  source.onerror = () => { source.close(); onError(); };
+  return () => source.close();
 }
