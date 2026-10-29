@@ -65,6 +65,8 @@ impl FileCategory {
         }
     }
 
+    /// True only for things the system or a tool regenerates (caches, temp and
+    /// build output, logs). Everything else needs the user's judgement.
     pub fn is_safe_to_delete(&self) -> bool {
         match self {
             FileCategory::Cache => true,
@@ -73,10 +75,11 @@ impl FileCategory {
             FileCategory::NodeModules => true,
             FileCategory::PackageCache => true,
             FileCategory::LogFiles => true,
-            FileCategory::OldFiles => true,
-            FileCategory::Archives => true,
-            FileCategory::Downloads => true,
-            FileCategory::DuplicateName => true,
+            // Anything below is the user's own data: never pre-selected.
+            FileCategory::OldFiles => false,
+            FileCategory::Archives => false,
+            FileCategory::Downloads => false,
+            FileCategory::DuplicateName => false,
             FileCategory::LargeFiles => false, // Need review
             FileCategory::HiddenFiles => false, // Might be config
             FileCategory::SystemFiles => false, // Dangerous
